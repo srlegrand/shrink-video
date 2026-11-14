@@ -1,0 +1,150 @@
+# Tests the scripts on Linux, macOS and Windows and builds the three installers.
+# Every push keeps the installers as workflow artifacts; pushing a tag like
+# v1.2.3 also publishes them as a GitHub release (which the website links to).
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (AppImage)
+    runs-on: ubuntu-latest
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: 1   # the runners have no FUSE
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg desktop-file-utils
+      - name: Test the script
+        run: tests/smoke.sh
+      - name: Build the AppImage
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" packaging/build-appimage.sh
+      - name: Test the AppImage
+        run: |
+          tests/smoke.sh "$PWD/dist/ShrinkVideo-x86_64.AppImage"
+          dist/ShrinkVideo-x86_64.AppImage --install
+          test -x "$HOME/.local/bin/shrink-video"
+          dist/ShrinkVideo-x86_64.AppImage --uninstall
+          test ! -e "$HOME/.local/bin/shrink-video"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/ShrinkVideo-x86_64.AppImage
+          if-no-files-found: error
+
+  macos:
+    name: macOS (pkg)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+      - name: Test the script with the system bash (3.2)
+        run: |
+          /bin/bash --version | head -n1
+          printf '#!/bin/sh\nexec /bin/bash "%s" "$@"\n' "$PWD/linux/shrink-video" > "$RUNNER_TEMP/shrink-video"
+          chmod +x "$RUNNER_TEMP/shrink-video"
+          tests/smoke.sh "$RUNNER_TEMP/shrink-video"
+      - name: Test the AppleScript plumbing used by the dialogs
+        run: |
+          out=$(osascript -e 'on run argv' -e 'return item 2 of argv' -e 'end run' x "-starts with a dash")
+          test "$out" = "-starts with a dash"
+          out=$(osascript -e 'on run argv' -e 'set picked to items 3 thru -1 of argv' \
+                -e 'set text item delimiters to "|"' -e 'return picked as text' -e 'end run' x a "b c" d)
+          test "$out" = "b c|d"
+      - name: Test the per-user installer
+        run: |
+          macos/install.sh
+          test -x "$HOME/.local/bin/shrink-video"
+          plutil -lint "$HOME/Library/Services/Shrink Video.workflow/Contents/Info.plist" \
+                       "$HOME/Library/Services/Shrink Video.workflow/Contents/document.wflow"
+          macos/install.sh --uninstall
+          test ! -e "$HOME/Library/Services/Shrink Video.workflow"
+      - name: Build the installer package
+        run: |
+          version=0.0.0
+          [[ $GITHUB_REF == refs/tags/v* ]] && version=${GITHUB_REF_NAME#v}
+          mkdir -p dist
+          macos/install.sh --pkg-root build/pkgroot
+          pkgbuild --root build/pkgroot --install-location / \
+                   --identifier io.github.srlegrand.shrink-video --version "$version" \
+                   dist/ShrinkVideo-macOS.pkg
+      - name: Test the installer package
+        run: |
+          sudo installer -pkg dist/ShrinkVideo-macOS.pkg -target /
+          test -x /usr/local/bin/shrink-video
+          test -f "/Library/Services/Shrink Video.workflow/Contents/document.wflow"
+          /usr/local/bin/shrink-video --help
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/ShrinkVideo-macOS.pkg
+          if-no-files-found: error
+
+  windows:
+    name: Windows (setup.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ffmpeg and Inno Setup
+        run: choco install ffmpeg innosetup -y --no-progress
+      - name: Test the script
+        shell: pwsh
+        run: tests/smoke.ps1
+      - name: Build the setup program
+        shell: pwsh
+        run: |
+          $version = '0.0.0'
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { $version = $env:GITHUB_REF_NAME.Substring(1) }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" windows\setup.iss
+          if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
+      - name: Test the setup program (silent install, then uninstall)
+        shell: pwsh
+        run: |
+          $key = 'HKCU:\Software\Classes\SystemFileAssociations\.mp4\shell\ShrinkVideo'
+          $dir = Join-Path $env:LOCALAPPDATA 'ShrinkVideo'
+          Start-Process -Wait dist\ShrinkVideo-Setup.exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS='
+          if (-not (Test-Path "$dir\shrink-video.ps1")) { throw 'script was not installed' }
+          if (-not (Test-Path $key)) { throw 'right-click menu was not added' }
+          Get-ChildItem "$key\shell" | ForEach-Object { (Get-ItemProperty $_.PSPath).MUIVerb }
+          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          Start-Sleep -Seconds 5   # the uninstaller finishes in a copy of itself
+          if (Test-Path $key) { throw 'right-click menu was not removed' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/ShrinkVideo-Setup.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Shrink Video $GITHUB_REF_NAME" --generate-notes

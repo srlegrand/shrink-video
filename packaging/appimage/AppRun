@@ -1,0 +1,76 @@
+#!/bin/bash
+# Entry point of ShrinkVideo.AppImage.
+#
+#   ShrinkVideo.AppImage                 install / update / remove the right-click menu
+#   ShrinkVideo.AppImage --install       install without asking
+#   ShrinkVideo.AppImage --uninstall     remove
+#   ShrinkVideo.AppImage [options] FILE  shrink a video right away (see --help)
+HERE=$(dirname "$(readlink -f "$0")")
+INSTALL="$HERE/usr/bin/install.sh"
+TITLE="Shrink video"
+
+case ${1-} in
+    --install)   exec "$INSTALL" ;;
+    --uninstall) exec "$INSTALL" --uninstall ;;
+    "")          ;;
+    *)           exec "$HERE/usr/bin/shrink-video" "$@" ;;
+esac
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# In a terminal: just install and say how to undo it.
+if [[ -t 1 ]]; then
+    "$INSTALL" || exit 1
+    echo "To remove it again: $(basename "${APPIMAGE:-$0}") --uninstall"
+    exit 0
+fi
+
+# Double-clicked: ask with a dialog.
+installed=0
+[[ -x $HOME/.local/bin/shrink-video ]] && installed=1
+action=install
+
+if have zenity; then
+    if ((installed)); then
+        choice=$(zenity --question --title="$TITLE" --no-markup --width=420 \
+            --text="Shrink video is already installed.
+
+Update it to this version, or remove it?" \
+            --ok-label="Update" --cancel-label="Close" --extra-button="Remove" 2>/dev/null)
+        rc=$?
+        if [[ $choice == Remove ]]; then action=uninstall
+        elif ((rc != 0)); then exit 0; fi
+    else
+        zenity --question --title="$TITLE" --no-markup --width=420 \
+            --text="Add \"Shrink video\" to the right-click menu of your video files?" \
+            --ok-label="Install" --cancel-label="Cancel" 2>/dev/null || exit 0
+    fi
+elif have kdialog; then
+    if ((installed)); then
+        kdialog --title "$TITLE" --yes-label "Update" --no-label "Remove" --cancel-label "Close" \
+            --yesnocancel "Shrink video is already installed.
+
+Update it to this version, or remove it?"
+        case $? in 0) ;; 1) action=uninstall ;; *) exit 0 ;; esac
+    else
+        kdialog --title "$TITLE" --yes-label "Install" --no-label "Cancel" \
+            --yesno "Add \"Shrink video\" to the right-click menu of your video files?" || exit 0
+    fi
+fi
+
+if [[ $action == uninstall ]]; then
+    out=$("$INSTALL" --uninstall 2>&1); rc=$?
+else
+    out=$("$INSTALL" 2>&1); rc=$?
+fi
+
+if have zenity; then
+    if ((rc == 0)); then zenity --info --title="$TITLE" --no-markup --width=460 --text="$out" 2>/dev/null
+    else zenity --error --title="$TITLE" --no-markup --width=460 --text="$out" 2>/dev/null; fi
+elif have kdialog; then
+    if ((rc == 0)); then kdialog --title "$TITLE" --msgbox "$out"
+    else kdialog --title "$TITLE" --error "$out"; fi
+elif have notify-send; then
+    notify-send "$TITLE" "$out"
+fi
+exit $rc

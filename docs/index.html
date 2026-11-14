@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shrink Video - right-click a video, pick a size</title>
+<meta name="description" content="Free, open-source right-click menu for Windows, macOS and Linux that shrinks any video to the file size you need. Nothing is uploaded.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16191d; --muted: #5b6470;
+    --line: #dfe3e8; --accent: #1f6feb; --accent-text: #ffffff; --soft: #eaf1fe;
+    --code: #eef0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --card: #171b21; --text: #e8ebef; --muted: #9aa4b1;
+      --line: #2a313a; --accent: #4c8dff; --accent-text: #0b0e12; --soft: #1a2536;
+      --code: #1f252d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; text-decoration: none; color: var(--text); }
+  .brand img { width: 32px; height: 32px; }
+  header nav a { margin-left: 18px; text-decoration: none; color: var(--muted); font-size: 15px; }
+  header nav a:hover { color: var(--text); }
+
+  .hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 36px; align-items: center; padding: 36px 0 44px; }
+  h1 { font-size: clamp(32px, 5.4vw, 48px); line-height: 1.1; margin: 0 0 16px; letter-spacing: -0.02em; text-wrap: balance; }
+  .lead { font-size: 19px; color: var(--muted); margin: 0 0 22px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 0; list-style: none; }
+  .pills li { font-size: 14px; padding: 4px 11px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); background: var(--card); }
+
+  /* Illustration: a right-click menu */
+  .demo { position: relative; height: 250px; font-size: 14px; user-select: none; }
+  .file { position: absolute; left: 0; top: 6px; width: 112px; text-align: center; color: var(--muted); }
+  .thumb { height: 70px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; margin-bottom: 6px; }
+  .thumb::after { content: ""; border: 13px solid transparent; border-left: 20px solid #fff; border-right: 0; }
+  .menu { position: absolute; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 5px; box-shadow: 0 10px 30px rgba(0,0,0,.14); }
+  .menu div { padding: 5px 12px; border-radius: 5px; white-space: nowrap; }
+  .menu .dim { color: var(--muted); }
+  .menu .on { background: var(--accent); color: var(--accent-text); }
+  .menu .sep { height: 1px; padding: 0; margin: 5px 4px; background: var(--line); }
+  .m1 { left: 124px; top: 30px; width: 160px; }
+  .m2 { left: 278px; top: 86px; }
+
+  section { padding: 30px 0; }
+  h2 { font-size: 26px; margin: 0 0 16px; letter-spacing: -0.01em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+  .tabs button {
+    font: inherit; font-size: 15px; padding: 7px 16px; border-radius: 99px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--text);
+  }
+  .tabs button[aria-selected="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .panel[hidden] { display: none; }
+  .btn {
+    display: inline-block; background: var(--accent); color: var(--accent-text); font-weight: 600;
+    padding: 12px 22px; border-radius: 10px; text-decoration: none; font-size: 17px;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn small { display: block; font-weight: 400; font-size: 13px; opacity: .85; }
+  ol.steps { margin: 18px 0 0; padding-left: 22px; }
+  ol.steps li { margin: 6px 0; }
+  .note { font-size: 15px; color: var(--muted); margin: 14px 0 0; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; background: var(--code); border-radius: 6px; }
+  code { padding: 2px 6px; }
+  pre { padding: 12px 14px; margin: 8px 0 0; white-space: pre-wrap; word-break: break-all; }
+  pre code { padding: 0; background: none; }
+
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid .card { padding: 18px; }
+  .grid h3 { margin: 0 0 4px; font-size: 17px; }
+  .grid p { margin: 0; color: var(--muted); font-size: 15.5px; }
+
+  details { border-top: 1px solid var(--line); padding: 13px 0; }
+  details:last-child { border-bottom: 1px solid var(--line); }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { color: var(--muted); margin: 10px 0 2px; }
+
+  footer { padding: 34px 0 50px; color: var(--muted); font-size: 15px; text-align: center; }
+
+  @media (max-width: 720px) {
+    .hero { grid-template-columns: 1fr; padding-top: 16px; }
+    .demo { max-width: 440px; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="brand" href="./"><img src="icon.svg" alt="">Shrink Video</a>
+  <nav>
+    <a href="#download">Download</a>
+    <a href="https://github.com/srlegrand/shrink-video">GitHub</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <div>
+    <h1>Right-click a video. Pick a size. Done.</h1>
+    <p class="lead">Shrink Video adds one entry to the right-click menu of your video files.
+      Choose 20&nbsp;MB, or any size you need, and a smaller copy appears next to the original.</p>
+    <ul class="pills">
+      <li>Free &amp; open source</li>
+      <li>Windows, macOS, Linux</li>
+      <li>Nothing is uploaded</li>
+    </ul>
+  </div>
+  <div class="demo" aria-hidden="true">
+    <div class="file"><div class="thumb"></div>holiday.mov<br>412 MB</div>
+    <div class="menu m1">
+      <div class="dim">Open</div>
+      <div class="dim">Open with</div>
+      <div class="sep"></div>
+      <div class="on">Shrink video &nbsp;&#9656;</div>
+      <div class="dim">Rename</div>
+      <div class="dim">Properties</div>
+    </div>
+    <div class="menu m2">
+      <div class="on">20 MB (default)</div>
+      <div>10 MB</div>
+      <div>50 MB</div>
+      <div>100 MB</div>
+      <div>Custom size...</div>
+    </div>
+  </div>
+</div>
+
+<section id="download">
+  <h2>Download</h2>
+  <div class="card">
+    <div class="tabs" role="tablist">
+      <button role="tab" data-os="windows" aria-selected="true">Windows</button>
+      <button role="tab" data-os="mac" aria-selected="false">macOS</button>
+      <button role="tab" data-os="linux" aria-selected="false">Linux</button>
+    </div>
+
+    <div class="panel" data-os="windows">
+      <a class="btn" href="https://github.com/srlegrand/shrink-video/releases/latest/download/ShrinkVideo-Setup.exe">
+        Download for Windows<small>ShrinkVideo-Setup.exe &middot; Windows 10 and 11</small></a>
+      <ol class="steps">
+        <li>Run the downloaded file. No administrator rights are needed.</li>
+        <li>Leave "install ffmpeg" ticked if it is offered. It is the engine that does the work.</li>
+        <li>Right-click a video and choose <b>Shrink video</b>. On Windows 11 it is under
+          <b>Show more options</b> (or hold Shift while right-clicking).</li>
+      </ol>
+      <p class="note">Windows may say "Windows protected your PC" because the installer is not
+        code-signed. Click <b>More info</b>, then <b>Run anyway</b>.</p>
+    </div>
+
+    <div class="panel" data-os="mac" hidden>
+      <a class="btn" href="https://github.com/srlegrand/shrink-video/releases/latest/download/ShrinkVideo-macOS.pkg">
+        Download for macOS<small>ShrinkVideo-macOS.pkg &middot; Intel and Apple Silicon</small></a>
+      <ol class="steps">
+        <li>Open the downloaded file. macOS will warn that it is not from an identified developer:
+          go to <b>System Settings &gt; Privacy &amp; Security</b> and click <b>Open Anyway</b>
+          (on older versions: right-click the file and choose <b>Open</b>).</li>
+        <li>Install ffmpeg, the engine that does the work: get <a href="https://brew.sh">Homebrew</a>,
+          then run <code>brew install ffmpeg</code> in Terminal.</li>
+        <li>Right-click a video in Finder and choose <b>Quick Actions &gt; Shrink Video</b>.</li>
+      </ol>
+      <p class="note">Prefer the Terminal? This installs it for your user only, with no warning to click through:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/srlegrand/shrink-video/main/macos/install.sh | bash</code></pre>
+    </div>
+
+    <div class="panel" data-os="linux" hidden>
+      <a class="btn" href="https://github.com/srlegrand/shrink-video/releases/latest/download/ShrinkVideo-x86_64.AppImage">
+        Download for Linux<small>ShrinkVideo-x86_64.AppImage &middot; Dolphin, Nautilus, Nemo</small></a>
+      <ol class="steps">
+        <li>Make the file executable (<b>Properties &gt; Permissions</b>, or <code>chmod +x</code>) and double-click it.</li>
+        <li>Click <b>Install</b>. Make sure ffmpeg is installed, for example <code>sudo apt install ffmpeg</code>.</li>
+        <li>Right-click a video and choose <b>Shrink video</b> (in GNOME Files: <b>Scripts &gt; Shrink video</b>).</li>
+      </ol>
+      <p class="note">Other architectures, or no AppImage please:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/srlegrand/shrink-video/main/linux/install.sh | bash</code></pre>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>You decide how it gets smaller</h2>
+  <p class="lead" style="font-size:17px">After you pick a size, tick what Shrink Video is allowed to do.
+    It then works out the mix that hurts least while still fitting, and remembers your choice.</p>
+  <div class="grid">
+    <div class="card"><h3>Resizing</h3><p>Lower the resolution, for example 1080p to 720p.</p></div>
+    <div class="card"><h3>Compressing</h3><p>Lower the picture quality a little.</p></div>
+    <div class="card"><h3>Dropping the framerate</h3><p>Fewer frames per second, for example 60 to 30.</p></div>
+    <div class="card"><h3>Speeding it up</h3><p>Play faster, up to 4x, so there is less video to store.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Good to know</h2>
+  <details>
+    <summary>What happens to my original video?</summary>
+    <p>Nothing. Shrink Video writes a new file next to it, such as <code>holiday_20MB.mp4</code>
+      (H.264 video and AAC audio, which plays everywhere).</p>
+  </details>
+  <details>
+    <summary>Is my video sent anywhere?</summary>
+    <p>No. Everything runs on your own computer using <a href="https://ffmpeg.org">ffmpeg</a>.
+      There is no account, no tracking and no internet connection involved.</p>
+  </details>
+  <details>
+    <summary>Why does my computer warn me about the installer?</summary>
+    <p>Signing certificates from Microsoft and Apple cost money every year, and this is a free
+      project. The installers are built automatically by GitHub from the
+      <a href="https://github.com/srlegrand/shrink-video">public source code</a>, which is only a few
+      short scripts you can read yourself.</p>
+  </details>
+  <details>
+    <summary>How do I remove it?</summary>
+    <p><b>Windows:</b> Settings &gt; Apps &gt; Installed apps &gt; Shrink Video &gt; Uninstall.<br>
+      <b>macOS:</b> run the Terminal command above with <code>| bash -s -- --uninstall</code> at the end.<br>
+      <b>Linux:</b> double-click the AppImage again and choose Remove.</p>
+  </details>
+  <details>
+    <summary>It says the video is too long to fit</summary>
+    <p>Very long videos cannot fit in very small sizes and still be watchable. Pick a larger size,
+      or tick more methods, especially "Speeding it up" and "Dropping the framerate".</p>
+  </details>
+</section>
+
+<footer>
+  Free software under the <a href="https://github.com/srlegrand/shrink-video/blob/main/LICENSE">MIT license</a>
+  &middot; <a href="https://github.com/srlegrand/shrink-video">Source on GitHub</a>
+  &middot; <a href="https://github.com/srlegrand/shrink-video/issues">Report a problem</a>
+</footer>
+
+</div>
+<script>
+  // Show the tab for the visitor's system first.
+  var tabs = document.querySelectorAll('.tabs button'), panels = document.querySelectorAll('.panel');
+  function show(os) {
+    tabs.forEach(function (t) { t.setAttribute('aria-selected', t.dataset.os === os); });
+    panels.forEach(function (p) { p.hidden = p.dataset.os !== os; });
+  }
+  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.os); }); });
+  var ua = navigator.userAgent;
+  show(/Mac|iPhone|iPad/.test(ua) ? 'mac' : /Linux|X11/.test(ua) && !/Android/.test(ua) ? 'linux' : 'windows');
+</script>
+</body>
+</html>

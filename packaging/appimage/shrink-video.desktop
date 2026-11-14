@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Shrink Video
+Comment=Right-click a video and shrink it to a target file size
+Exec=shrink-video
+Icon=shrink-video
+Categories=AudioVideo;Video;
+Terminal=false

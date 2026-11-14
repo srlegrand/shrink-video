@@ -1,0 +1,466 @@
+#!/usr/bin/env bash
+# shrink-video - re-encode videos so they fit under a target file size.
+#
+#   shrink-video [--size MB] [--ask] [--methods LIST] FILE...
+#
+# You choose which methods may be used (resize, fps, speed, compress) and the
+# script picks the combination that hurts the picture least while still
+# fitting in the target size. Writes FILE_<size>MB.mp4 next to each input
+# (H.264 + AAC, two-pass). Shows GUI dialogs when launched from a file
+# manager, plain text in a terminal. Runs on Linux and macOS (bash 3.2+).
+set -u -o pipefail
+
+MAC=0
+if [[ $(uname -s) == Darwin ]]; then
+    MAC=1
+    # Finder starts Quick Actions with a bare PATH; add Homebrew / MacPorts.
+    PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
+fi
+
+DEFAULT_MB=20
+DEFAULT_METHODS="resize,compress"
+SIZE_MB=$DEFAULT_MB
+METHODS=""
+ASK=0
+FORCE_CLI=0
+FORCE_GUI=0
+FILES=()
+
+usage() {
+    cat <<EOF
+Usage: shrink-video [--size MB] [--ask] [--methods LIST] FILE...
+  -s, --size MB       target size in MB (default: $DEFAULT_MB)
+      --ask           prompt for the target size
+  -m, --methods LIST  comma-separated methods the script may use:
+                        resize    lower the resolution
+                        fps       drop the framerate
+                        speed     speed the video up
+                        compress  lower the picture quality
+                      (default in a terminal: $DEFAULT_METHODS;
+                       from a file manager a dialog asks)
+      --cli           never show dialogs, even when not run from a terminal
+      --gui           always show dialogs (used by the macOS Quick Action)
+EOF
+}
+
+while (($#)); do
+    case $1 in
+        -s|--size)    [[ $# -ge 2 ]] || { usage >&2; exit 2; }; SIZE_MB=$2; shift 2 ;;
+        -m|--methods) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; METHODS=$2; shift 2 ;;
+        --ask)        ASK=1; shift ;;
+        --cli)        FORCE_CLI=1; shift ;;
+        --gui)        FORCE_GUI=1; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        --)           shift; FILES+=("$@"); break ;;
+        *)            FILES+=("$1"); shift ;;
+    esac
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+GUI=0
+if ((FORCE_CLI)); then GUI=0
+elif ((FORCE_GUI)); then GUI=1
+elif ((!MAC)) && [[ ! -t 1 && -n "${DISPLAY-}${WAYLAND_DISPLAY-}" ]]; then GUI=1
+fi
+
+TITLE="Shrink video"
+
+# macOS dialogs. Runs AppleScript lines ($1, newline separated) with the
+# remaining arguments available as "item 2 of argv", "item 3 of argv", ...
+# (item 1 is a dummy, so that a text starting with "-" is never read as an option.)
+mac_osa() {
+    local script=$1 line args=(-e 'on run argv' -e 'try' -e 'activate' -e 'end try')
+    shift
+    while IFS= read -r line; do args+=(-e "$line"); done <<<"$script"
+    osascript "${args[@]}" -e 'end run' x "$@" 2>/dev/null
+}
+
+notify() {
+    echo "$1"
+    if ((GUI && MAC)); then
+        mac_osa 'display dialog (item 2 of argv) with title "Shrink video" buttons {"OK"} default button 1 giving up after 30' "$1" >/dev/null
+    elif ((GUI)) && have notify-send; then
+        notify-send -a "$TITLE" -i video-x-generic "$TITLE" "$1"
+    fi
+}
+
+fail() {
+    echo "Error: $1" >&2
+    if ((GUI && MAC)); then
+        mac_osa 'display alert "Shrink video" message (item 2 of argv) as critical' "$1" >/dev/null
+    elif ((GUI)); then
+        if have zenity; then zenity --error --title="$TITLE" --no-markup --width=420 --text="$1"
+        elif have kdialog; then kdialog --title "$TITLE" --error "$1"
+        elif have notify-send; then notify-send -u critical "$TITLE" "$1"
+        fi
+    fi
+}
+
+ask_size() {
+    local answer
+    if ((GUI && MAC)); then
+        answer=$(mac_osa 'text returned of (display dialog "Target size in MB:" with title "Shrink video" default answer (item 2 of argv) buttons {"Cancel", "Next"} default button 2)' "$DEFAULT_MB") || exit 0
+    elif ((GUI)) && have zenity; then
+        answer=$(zenity --entry --title="$TITLE" --text="Target size in MB:" --entry-text="$DEFAULT_MB") || exit 0
+    elif ((GUI)) && have kdialog; then
+        answer=$(kdialog --title "$TITLE" --inputbox "Target size in MB:" "$DEFAULT_MB") || exit 0
+    else
+        read -rp "Target size in MB [$DEFAULT_MB]: " answer || exit 0
+    fi
+    SIZE_MB=${answer:-$DEFAULT_MB}
+}
+
+# Checkbox dialog: which methods may be used. Remembers the last choice.
+ask_methods() {
+    local conf="${XDG_CONFIG_HOME:-$HOME/.config}/shrink-video/methods"
+    local saved=$DEFAULT_METHODS answer what
+    [[ -r $conf ]] && saved=$(head -n1 "$conf")
+    if ((${#FILES[@]} == 1)); then what=$(basename -- "${FILES[0]}"); else what="${#FILES[@]} videos"; fi
+    local prompt="Shrink $what to $SIZE_MB MB by:"
+
+    if ((MAC)); then
+        local l_resize="Resizing - lower the resolution" l_speed="Speeding it up - play faster"
+        local l_fps="Dropping the framerate" l_compress="Compressing - lower the picture quality"
+        local defaults=()
+        [[ ,$saved, == *,resize,* ]]   && defaults+=("$l_resize")
+        [[ ,$saved, == *,speed,* ]]    && defaults+=("$l_speed")
+        [[ ,$saved, == *,fps,* ]]      && defaults+=("$l_fps")
+        [[ ,$saved, == *,compress,* ]] && defaults+=("$l_compress")
+        ((${#defaults[@]})) || defaults=("$l_resize" "$l_compress")
+        answer=$(mac_osa 'set picked to choose from list (items 3 thru 6 of argv) with title "Shrink video" with prompt ((item 2 of argv) & return & "(Cmd-click to pick several)") default items (items 7 thru -1 of argv) OK button name "Shrink" with multiple selections allowed
+if picked is false then error number -128
+set text item delimiters to "|"
+return picked as text' "$prompt" "$l_resize" "$l_speed" "$l_fps" "$l_compress" "${defaults[@]}") || exit 0
+        local picked=""
+        [[ $answer == *"$l_resize"* ]]   && picked+="resize,"
+        [[ $answer == *"$l_speed"* ]]    && picked+="speed,"
+        [[ $answer == *"$l_fps"* ]]      && picked+="fps,"
+        [[ $answer == *"$l_compress"* ]] && picked+="compress,"
+        answer=${picked%,}
+    elif have zenity; then
+        zon() { if [[ ,$saved, == *,$1,* ]]; then echo TRUE; else echo FALSE; fi; }
+        answer=$(zenity --list --checklist --title="$TITLE" --text="$prompt" \
+            --column="" --column="id" --column="Method" --column="What it does" \
+            --hide-column=2 --print-column=2 --separator=, --width=560 --height=340 \
+            "$(zon resize)"   resize   "Resizing"               "Lower the resolution" \
+            "$(zon speed)"    speed    "Speeding it up"         "Play faster, so there is less video to store" \
+            "$(zon fps)"      fps      "Dropping the framerate" "Fewer frames per second" \
+            "$(zon compress)" compress "Compressing"            "Lower the picture quality" \
+            2>/dev/null) || exit 0
+    elif have kdialog; then
+        kon() { if [[ ,$saved, == *,$1,* ]]; then echo on; else echo off; fi; }
+        answer=$(kdialog --title "$TITLE" --separate-output --checklist "$prompt" \
+            resize   "Resizing (lower the resolution)"               "$(kon resize)" \
+            speed    "Speeding it up (play faster)"                  "$(kon speed)" \
+            fps      "Dropping the framerate"                        "$(kon fps)" \
+            compress "Compressing (lower the picture quality)"       "$(kon compress)") || exit 0
+        answer=$(printf '%s\n' "$answer" | paste -sd, -)
+    else
+        answer=$saved
+    fi
+
+    METHODS=$answer
+    if [[ -n $METHODS ]]; then
+        mkdir -p "$(dirname "$conf")" 2>/dev/null && printf '%s\n' "$METHODS" > "$conf" 2>/dev/null
+    fi
+}
+
+filesize() { stat -c %s -- "$1" 2>/dev/null || stat -f %z -- "$1"; }   # GNU || BSD
+
+human() { awk -v b="$1" 'BEGIN { printf "%.1f MB", b / 1000000 }'; }
+
+TMP=""
+PART=""
+cleanup() {
+    [[ -n $TMP ]] && rm -rf -- "$TMP"
+    [[ -n $PART ]] && rm -f -- "$PART"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# Picks resolution / framerate / speed / bitrate for the current file.
+#
+# Model: a "good looking" encode needs about 4000 kb/s at 1080p30, scaling
+# with pixels^0.75 and fps^0.5. Quality x is the bitrate we can afford
+# divided by that (never aiming higher than the source's own quality).
+# Every allowed method has a cost; we take the candidate with the best
+# overall score. Without "compress", x must stay near 1 and the other
+# methods have to do the work - if they cannot, compression is forced.
+#
+# Sets: SHORT FPS SPEED VKBPS AKBPS FORCED   (returns 1 if nothing fits)
+plan() {
+    local out
+    out=$(awk -v limit="$1" -v factor="$2" -v dur="$DUR" -v sw="$SRC_W" -v sh="$SRC_H" \
+              -v sfps="$SRC_FPS" -v srcv="$SRC_VKBPS" -v audio="$HAS_AUDIO" \
+              -v mr="$M_RESIZE" -v mf="$M_FPS" -v ms="$M_SPEED" -v mc="$M_COMPRESS" '
+        function needed(short, fps) {
+            return 4000 * exp(0.75 * log(short * short * aspect / 2073600)) * sqrt(fps / 30)
+        }
+        function fw(x) { return x / (x + 8) }
+        BEGIN {
+            sshort = (sw < sh) ? sw : sh
+            aspect = ((sw > sh) ? sw : sh) / sshort
+            qt = srcv / needed(sshort, sfps); if (qt > 1) qt = 1
+
+            ns = 0; shorts[ns++] = sshort
+            if (mr) { n = split("2160 1440 1080 720 540 480 360 240", c, " ")
+                      for (i = 1; i <= n; i++) if (c[i] < sshort) shorts[ns++] = c[i] }
+            nf = 0; fpss[nf++] = sfps
+            if (mf) for (i = 2; i <= 4; i++) if (sfps / i >= 10) fpss[nf++] = sfps / i
+            np = 0; speeds[np++] = 1
+            if (ms) { n = split("1.25 1.5 1.75 2 2.5 3 4", c, " ")
+                      for (i = 1; i <= n; i++) speeds[np++] = c[i] }
+
+            best = -1; bestok = -1
+            for (a = 0; a < ns; a++) for (b = 0; b < nf; b++) for (p = 0; p < np; p++) {
+                short = shorts[a]; fps = fpss[b]; s = speeds[p]
+                total = limit * 8 / (dur / s) / 1000 * factor
+                ak = 0
+                if (audio) ak = (total >= 1500) ? 128 : (total >= 700) ? 96 : (total >= 300) ? 64 : 32
+                v = total - ak
+                if (v < 40) continue
+                x = v / needed(short, fps) / qt; if (x > 1) x = 1
+                cost = sqrt(short / sshort) * (fw(fps) / fw(sfps)) / sqrt(s)
+                score = cost * 1.3 * x / (x + 0.3)
+                line = sprintf("%d %.3f %s %d %d", short, fps, s, (v > srcv) ? srcv : v, ak)
+                if (score > best) { best = score; bestline = line }
+                if (x >= 0.85 && cost + x / 1000 > bestok) { bestok = cost + x / 1000; okline = line }
+            }
+            if (best < 0) exit 1
+            if (mc)               print bestline, 0
+            else if (bestok >= 0) print okline, 0
+            else                  print bestline, 1
+        }') || return 1
+    read -r SHORT FPS SPEED VKBPS AKBPS FORCED <<<"$out"
+}
+
+# Human-readable description of the current plan.
+describe() {
+    local parts=() src_short=$((SRC_W < SRC_H ? SRC_W : SRC_H))
+    ((SHORT < src_short)) && parts+=("${src_short}p -> ${SHORT}p")
+    if awk -v a="$FPS" -v b="$SRC_FPS" 'BEGIN { exit !(a < b - 0.01) }'; then
+        parts+=("$(awk -v a="$SRC_FPS" -v b="$FPS" 'BEGIN { printf "%.4g -> %.4g fps", a, b }')")
+    fi
+    [[ $SPEED != 1 ]] && parts+=("${SPEED}x speed")
+    parts+=("video ${VKBPS} kb/s")
+    local IFS=,
+    echo "${parts[*]}" | sed 's/,/, /g'
+}
+
+# Reads ffmpeg -progress output, prints a percentage between $1 and $2.
+progress() {
+    awk -F= -v d="$OUT_DUR" -v lo="$1" -v hi="$2" '
+        $1 == "out_time_ms" && $2 ~ /^[0-9]+$/ {
+            p = lo + ($2 / 1000000 / d) * (hi - lo)
+            if (p > 99) p = 99
+            printf "%d\n", p
+            fflush()
+        }'
+}
+
+# Two-pass encode of $IN to $PART. Emits zenity-style progress lines on stdout.
+encode() {
+    local common=(-hide_banner -loglevel error -nostdin -y -nostats -progress pipe:1
+                  -i "$IN" -map 0:v:0 -c:v libx264 -preset medium -b:v "${VKBPS}k"
+                  -pix_fmt yuv420p -vf "$VF" -passlogfile "$TMP/pass" -sn -dn)
+
+    local audio=(-an)
+    if ((AKBPS > 0)); then
+        audio=(-map 0:a:0 -c:a aac -b:a "${AKBPS}k" -ac 2)
+        [[ -n $AF ]] && audio+=(-af "$AF")
+    fi
+
+    # Pass 1 must use the same muxer as pass 2, or the frame counts can differ.
+    echo "# $NAME - pass 1 of 2 (analysing)"
+    ffmpeg "${common[@]}" -pass 1 -an -f mp4 /dev/null 2>>"$TMP/ffmpeg.log" | progress 0 35 || return 1
+    echo "# $NAME - pass 2 of 2 (encoding)"
+    ffmpeg "${common[@]}" -pass 2 "${audio[@]}" -movflags +faststart -f mp4 "$PART" 2>>"$TMP/ffmpeg.log" | progress 35 100 || return 1
+    echo 100
+}
+
+# Runs encode with whatever progress display is available.
+# Returns 0 on success, 1 on failure, 2 if the user cancelled.
+run_encode() {
+    local st
+    if ((GUI)) && have zenity; then
+        encode | zenity --progress --title="$TITLE" --text="$NAME" --percentage=0 \
+                        --auto-close --no-markup --width=440 2>/dev/null
+        st=("${PIPESTATUS[@]}")
+        ((st[1] != 0)) && return 2
+    elif ((GUI)); then
+        # No progress bar available (macOS, or no zenity): say that work has started.
+        if ((MAC)); then
+            mac_osa 'display notification (item 2 of argv) with title "Shrink video"' "Shrinking $NAME - this can take a while..." >/dev/null
+        elif have notify-send; then
+            notify-send -a "$TITLE" -i video-x-generic "$TITLE" "Shrinking $NAME - this can take a while..."
+        fi
+        encode >/dev/null
+        st=($?)
+    else
+        encode | while IFS= read -r line; do
+            if [[ $line == \#* ]]; then printf '\n%s\n' "${line#\# }"; else printf '\r  %3d%%' "$line"; fi
+        done
+        st=("${PIPESTATUS[@]}")
+        echo
+    fi
+    ((st[0] == 0))
+}
+
+probe() { ffprobe -v error "$@" 2>/dev/null; }
+
+shrink_one() {
+    IN=$(realpath -- "$1" 2>/dev/null) || IN=$1
+    [[ $IN == /* ]] || IN="$PWD/$IN"
+    NAME=$(basename -- "$IN")
+    [[ -f $IN ]] || { fail "Not a file: $1"; return 1; }
+
+    local limit insize
+    limit=$(awk -v m="$SIZE_MB" 'BEGIN { printf "%d", m * 1000000 }')
+    insize=$(filesize "$IN")
+    if ((insize <= limit)); then
+        notify "$NAME is already under $SIZE_MB MB ($(human "$insize")) - nothing to do."
+        return 0
+    fi
+
+    DUR=$(probe -show_entries format=duration -of csv=p=0 "$IN" | head -n1)
+    if ! awk -v d="$DUR" 'BEGIN { exit !(d ~ /^[0-9.]+$/ && d > 0) }'; then
+        fail "$NAME: could not read the video duration (is this a video file?)"
+        return 1
+    fi
+
+    # Source picture properties.
+    local info fr br
+    info=$(probe -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,bit_rate -of default=nw=1 "$IN")
+    SRC_W=$(sed -n 's/^width=//p' <<<"$info" | head -n1)
+    SRC_H=$(sed -n 's/^height=//p' <<<"$info" | head -n1)
+    fr=$(sed -n 's/^avg_frame_rate=//p' <<<"$info" | head -n1)
+    br=$(sed -n 's/^bit_rate=//p' <<<"$info" | head -n1)
+    if ! [[ $SRC_W =~ ^[0-9]+$ && $SRC_H =~ ^[0-9]+$ ]] || ((SRC_W < 16 || SRC_H < 16)); then
+        fail "$NAME: no video stream found."
+        return 1
+    fi
+    SRC_FPS=$(awk -v fr="$fr" 'BEGIN { split(fr, a, "/"); f = (a[2] > 0) ? a[1] / a[2] : a[1] + 0
+                                       if (f < 1 || f > 240) f = 30; printf "%.3f", f }')
+    # Video bitrate: from the stream if known, otherwise the whole file's.
+    SRC_VKBPS=$(awk -v br="$br" -v size="$insize" -v d="$DUR" 'BEGIN {
+        if (br ~ /^[0-9]+$/ && br > 0) printf "%d", br / 1000; else printf "%d", size * 8 / d / 1000 }')
+
+    HAS_AUDIO=0
+    [[ -n $(probe -select_streams a -show_entries stream=index -of csv=p=0 "$IN" | head -n1) ]] && HAS_AUDIO=1
+
+    local dir stem out n
+    dir=$(dirname -- "$IN")
+    [[ -w $dir ]] || { fail "Cannot write to $dir"; return 1; }
+    stem=${NAME%.*}
+    out="$dir/${stem}_${SIZE_MB}MB.mp4"
+    n=2
+    while [[ -e $out ]]; do out="$dir/${stem}_${SIZE_MB}MB_$n.mp4"; n=$((n + 1)); done
+    PART="$out.part"
+    TMP=$(mktemp -d)
+
+    local factor=0.97 attempt rc outsize desc
+    for attempt in 1 2 3; do
+        if ! plan "$limit" "$factor"; then
+            fail "$NAME is too long to fit in $SIZE_MB MB with the selected methods."
+            return 1
+        fi
+        desc=$(describe)
+        echo "$NAME: $desc"
+
+        # Video filters: speed, then framerate, then size (always forced to even dimensions).
+        VF=""
+        AF=""
+        if [[ $SPEED != 1 ]]; then
+            VF="setpts=PTS/$SPEED,"
+            if awk -v s="$SPEED" 'BEGIN { exit !(s > 2) }'; then
+                AF="atempo=2,atempo=$(awk -v s="$SPEED" 'BEGIN { printf "%.4f", s / 2 }')"
+            else
+                AF="atempo=$SPEED"
+            fi
+        fi
+        if [[ $SPEED != 1 ]] || awk -v a="$FPS" -v b="$SRC_FPS" 'BEGIN { exit !(a < b - 0.01) }'; then
+            VF+="fps=$FPS,"
+        fi
+        VF+="scale='if(gt(iw,ih),-2,trunc(min(iw,$SHORT)/2)*2)':'if(gt(iw,ih),trunc(min(ih,$SHORT)/2)*2,-2)'"
+        OUT_DUR=$(awk -v d="$DUR" -v s="$SPEED" 'BEGIN { printf "%.3f", d / s }')
+
+        run_encode; rc=$?
+        if ((rc == 2)); then echo "Cancelled."; return 2; fi
+        if ((rc != 0)); then
+            fail "$NAME: ffmpeg failed.
+
+$(tail -n 8 "$TMP/ffmpeg.log" 2>/dev/null)"
+            return 1
+        fi
+
+        outsize=$(filesize "$PART")
+        if ((outsize <= limit)); then
+            mv -f -- "$PART" "$out"
+            PART=""
+            ((FORCED)) && desc+="
+(The selected methods were not enough on their own, so it was also compressed.)"
+            notify "$NAME: $(human "$insize") -> $(human "$outsize")
+$desc
+Saved as $(basename -- "$out")"
+            rm -rf -- "$TMP"; TMP=""
+            return 0
+        fi
+        # Overshot: lower the bitrate proportionally and try again.
+        factor=$(awk -v f="$factor" -v l="$limit" -v o="$outsize" 'BEGIN { printf "%.4f", f * l / o * 0.98 }')
+    done
+
+    fail "$NAME: could not get under $SIZE_MB MB after 3 attempts."
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+
+if ! have ffmpeg || ! have ffprobe; then
+    if ((MAC)); then
+        fail "ffmpeg is not installed. Install Homebrew (https://brew.sh), then run this in Terminal:
+
+brew install ffmpeg"
+    else
+        fail "ffmpeg is not installed. Install it with your package manager (e.g. sudo apt install ffmpeg)."
+    fi
+    exit 1
+fi
+if ((${#FILES[@]} == 0)); then usage >&2; exit 2; fi
+
+((ASK)) && ask_size
+SIZE_MB=${SIZE_MB//,/.}
+SIZE_MB=${SIZE_MB%[mM][bB]}
+SIZE_MB=${SIZE_MB// /}
+if ! awk -v m="$SIZE_MB" 'BEGIN { exit !(m ~ /^[0-9]+([.][0-9]+)?$/ && m > 0) }'; then
+    fail "Invalid size: '$SIZE_MB'. Enter a number of megabytes, e.g. 20."
+    exit 2
+fi
+
+if [[ -z $METHODS ]]; then
+    if ((GUI)); then ask_methods; else METHODS=$DEFAULT_METHODS; fi
+fi
+M_RESIZE=0; M_FPS=0; M_SPEED=0; M_COMPRESS=0
+IFS=', ' read -ra _methods <<<"$METHODS"
+for m in ${_methods[@]+"${_methods[@]}"}; do
+    case $m in
+        resize)        M_RESIZE=1 ;;
+        fps|framerate) M_FPS=1 ;;
+        speed)         M_SPEED=1 ;;
+        compress)      M_COMPRESS=1 ;;
+        *) fail "Unknown method '$m'. Use: resize, fps, speed, compress."; exit 2 ;;
+    esac
+done
+if ((M_RESIZE + M_FPS + M_SPEED + M_COMPRESS == 0)); then
+    fail "Select at least one way to shrink the video."
+    exit 2
+fi
+
+status=0
+for f in "${FILES[@]}"; do
+    shrink_one "$f"; rc=$?
+    cleanup; TMP=""; PART=""
+    ((rc == 2)) && exit 130
+    ((rc != 0)) && status=1
+done
+exit $status
