@@ -27,5 +27,16 @@ function Test-Shrink([string]$size, [string]$methods, [long]$limit) {
 Test-Shrink '1'   'resize,compress'  1000000
 Test-Shrink '0.5' 'resize,fps,speed' 500000
 
+# Exactly what the right-click menu runs: no -Methods, the file as a bare argument
+# (the options dialog is skipped, its defaults are used).
+$env:SHRINK_VIDEO_NO_DIALOG = '1'
+'' | powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -SizeMB 0.8 $clip
+if ($LASTEXITCODE -ne 0) { throw "menu-style run exited with $LASTEXITCODE" }
+if (-not (Test-Path -LiteralPath (Join-Path $work 'my clip_0.8MB.mp4'))) { throw 'menu-style run created no file' }
+'' | powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Ask $clip
+if ($LASTEXITCODE -ne 0) { throw "menu-style -Ask run exited with $LASTEXITCODE" }
+Remove-Item Env:SHRINK_VIDEO_NO_DIALOG
+Write-Host 'ok (menu-style arguments)'
+
 Remove-Item -LiteralPath $work -Recurse -Force
 Write-Host 'All good.'

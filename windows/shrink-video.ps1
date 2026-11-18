@@ -6,11 +6,14 @@
 # script picks the combination that hurts the picture least while still
 # fitting in the target size. Without -Methods a dialog asks.
 # Writes FILE_<size>MB.mp4 next to each input (H.264 + AAC, two-pass).
+# Only FILE is positional. Otherwise the right-click menu's
+# `-SizeMB 20 "C:\clip.mp4"` would put the path in -Methods and leave no files.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [double]$SizeMB = 20,
     [switch]$Ask,
     [string]$Methods = '',
-    [Parameter(ValueFromRemainingArguments = $true)]
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Files
 )
 
@@ -158,7 +161,11 @@ if ($Methods -eq '') {
     if ($Files.Count -eq 1) { $what = Split-Path -Leaf $Files[0] } else { $what = "$($Files.Count) videos" }
     if ($Ask) { $SizeMB = $DefaultMB }
 
-    $choice = Show-OptionsDialog $SizeMB $saved $what
+    if ($env:SHRINK_VIDEO_NO_DIALOG) {   # for the automated test: accept the dialog's defaults
+        $choice = @{ Size = $SizeMB; Methods = $saved }
+    } else {
+        $choice = Show-OptionsDialog $SizeMB $saved $what
+    }
     if ($null -eq $choice) { exit 0 }
     $SizeMB = $choice.Size
     $Methods = $choice.Methods
